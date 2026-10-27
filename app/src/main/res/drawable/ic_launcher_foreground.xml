@@ -1,33 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- ¥ 符号：按 512 设计稿等比缩放到 108 viewport（k = 108/512） -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
+    <!-- 右上角柔光圆 -->
     <path
-        android:pathData="M45,37 L54,52 L63,37"
+        android:pathData="M80.1,27.8 m-18.1,0 a18.1,18.1 0 1,0 36.2,0 a18.1,18.1 0 1,0 -36.2,0"
+        android:fillColor="#1AFFFFFF" />
+
+    <!-- ¥ 的 V 形双臂 -->
+    <path
+        android:pathData="M36.3,31.6 L54,57.4 L71.7,31.6"
         android:strokeColor="#FFFFFF"
-        android:strokeWidth="7"
+        android:strokeWidth="6.3"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
         android:fillColor="#00000000" />
+
+    <!-- 竖线 -->
     <path
-        android:pathData="M54,50 L54,74"
+        android:pathData="M54,57.4 L54,81"
         android:strokeColor="#FFFFFF"
-        android:strokeWidth="7"
+        android:strokeWidth="6.3"
         android:strokeLineCap="round"
         android:fillColor="#00000000" />
+
+    <!-- 两道横线 -->
     <path
-        android:pathData="M42,56 L66,56"
+        android:pathData="M39.7,62.4 L68.3,62.4"
         android:strokeColor="#FFFFFF"
-        android:strokeWidth="7"
+        android:strokeWidth="6.3"
         android:strokeLineCap="round"
         android:fillColor="#00000000" />
+
     <path
-        android:pathData="M42,65 L66,65"
+        android:pathData="M39.7,72.6 L68.3,72.6"
         android:strokeColor="#FFFFFF"
-        android:strokeWidth="7"
+        android:strokeWidth="6.3"
         android:strokeLineCap="round"
         android:fillColor="#00000000" />
 
