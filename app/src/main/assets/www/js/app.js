@@ -1059,8 +1059,10 @@
       });
     }
 
-    // 注册 Service Worker（PWA 离线可用）
-    if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    // 注册 Service Worker（仅浏览器里的 PWA 需要）
+    // App 内的资源本来就打包在安装包里，注册 SW 反而会让「覆盖升级后还显示旧界面」。
+    var inApp = !!(window.JZ && window.JZ.available && window.JZ.available());
+    if ('serviceWorker' in navigator && location.protocol === 'https:' && !inApp) {
       window.addEventListener('load', function () {
         navigator.serviceWorker.register('sw.js').catch(function () { /* 忽略 */ });
       });

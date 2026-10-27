@@ -1,13 +1,16 @@
 /* 记账本 Service Worker —— 让页面可离线打开 */
-var CACHE = 'jizhang-v3';
+var CACHE = 'jizhang-v4';
 var ASSETS = [
   './',
   './index.html',
   './css/style.css',
   './js/db.js',
+  './js/native.js',
   './js/app.js',
   './manifest.webmanifest',
-  './icons/icon.svg'
+  './icons/icon.svg',
+  './icons/icon-192.png',
+  './icons/icon-512.png'
 ];
 
 self.addEventListener('install', function (e) {
