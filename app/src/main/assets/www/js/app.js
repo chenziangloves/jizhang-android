@@ -415,6 +415,10 @@
     if (state.view === 'home') el.innerHTML = viewHome();
     else if (state.view === 'list') el.innerHTML = viewList();
     else el.innerHTML = viewSettings();
+
+    // 悬浮「记一笔」只在首页出现
+    var fab = $('#fab');
+    if (fab) fab.classList.toggle('gone', state.view !== 'home');
   }
 
   function setView(v) {

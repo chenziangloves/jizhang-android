@@ -43,7 +43,32 @@ git -C android commit -m "sync: 说明"
 git -C android push
 ```
 
-推送后 Actions 自动编译，2 分钟左右在 Releases 出新的 `jizhang-latest.apk`。
+推送后 Actions 自动编译，2 分钟左右出未签名包，接着跑一次 `python tools/publish_release.py`
+用固定密钥签名并发布成 `jizhang-latest.apk`（CI 目前拿不到 Secrets，所以签名在本地补）。
+
+> 这台机器 `git push` 到 `github.com` 常被网络挡住时，改用
+> `python tools/push_via_api.py android`（走 api.github.com，不经过 git 传输层）。
+
+## 覆盖升级为什么不丢数据
+
+手机允许「下载新包直接装、不用卸载」要同时满足三条，现在三条都锁死了：
+
+| 条件 | 现在的值 |
+| --- | --- |
+| 包名相同 | `com.chenziang.jizhang`（从 v1.1 起没变过） |
+| 签名相同 | SHA-256 `cf3995e9…3bb9`（`secrets/jizhang-release.jks`，30 年有效） |
+| versionCode 变大 | v1.1 = `2` → v1.2.5 = `1005`（每次构建自动加一） |
+
+满足这三条时，系统执行的是**原地更新**：APK 里的代码被换掉，
+而 App 私有目录（IndexedDB 账本、自动备份）原封不动。
+
+数据还有两层保险：
+
+1. 更新只换代码不动数据目录 —— 主保险；
+2. 每次记账 4 秒后自动写一份备份到 `下载/记账本备份/` —— 万一哪天真出意外（比如误卸载），装回来在「设置 → 导入恢复」能捞回来。
+
+**唯一会失败的情况**：手机上装的还是早期 debug 签名版。系统会提示「应用未安装」。
+处理办法是一次性迁移：旧版里「设置 → 导出备份」→ 卸载 → 装新版 → 「导入恢复」。之后永久无忧。
 
 ## 原生桥（JS 侧 `window.JZ`，定义在 `js/native.js`）
 

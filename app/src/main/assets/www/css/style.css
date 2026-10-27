@@ -385,10 +385,16 @@ input { font-family: inherit; }
   display: flex; align-items: center; justify-content: center;
   box-shadow: 0 8px 22px rgba(255, 106, 58, .42);
   z-index: 45;
-  transition: transform .16s cubic-bezier(.34, 1.56, .64, 1);
+  transition: transform .16s cubic-bezier(.34, 1.56, .64, 1), opacity .18s ease;
 }
 .fab svg { width: 25px; height: 25px; }
 .fab:active { transform: scale(.9); }
+/* 只在首页出现：切到流水/设置时收起，避免挡住下面的内容 */
+.fab.gone {
+  opacity: 0;
+  transform: scale(.55) translateY(14px);
+  pointer-events: none;
+}
 
 /* ---------------- 记一笔面板 ---------------- */
 .sheet-backdrop,
