@@ -49,11 +49,14 @@ jobs:
       # 版本号自动递增：versionCode 用「1000 + 构建序号」，保证永远比手机里装的大，
       # 这样系统才会走「覆盖安装」而不是拒绝安装。versionName 形如 1.2.37。
       - name: Compute version
+        id: ver
         run: |
           VC=$((1000 + ${{ github.run_number }}))
           VN="1.2.${{ github.run_number }}"
           echo "VC=$VC" >> "$GITHUB_ENV"
           echo "VN=$VN" >> "$GITHUB_ENV"
+          echo "VC=$VC" >> "$GITHUB_OUTPUT"
+          echo "VN=$VN" >> "$GITHUB_OUTPUT"
           echo "本次版本：$VN (versionCode=$VC)"
 
       # 从 Secrets 还原固定签名密钥（不进仓库），现场写 keystore.properties 供 Gradle 读取。
@@ -91,7 +94,7 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build release APK
-        run: gradle :app:assembleRelease --no-daemon --stacktrace -PappVersionCode=$VC -PappVersionName=$VN
+        run: gradle :app:assembleRelease --no-daemon --stacktrace -PappVersionCode=${{ steps.ver.outputs.VC }} -PappVersionName=${{ steps.ver.outputs.VN }}
 
       # 校验签名与版本号，避免出现「未签名包被当正式包发出去」
       - name: Verify signature
@@ -120,12 +123,12 @@ jobs:
         if: env.HAS_KS == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ env.VN }}
-          name: 记账本 v${{ env.VN }}
+          tag_name: v${{ steps.ver.outputs.VN }}
+          name: 记账本 v${{ steps.ver.outputs.VN }}
           prerelease: false
           files: app/build/outputs/apk/release/app-release.apk#jizhang-latest.apk
           body: |
-            记账本 Android 版 v${{ env.VN }}（versionCode ${{ env.VC }}）
+            记账本 Android 版 v${{ steps.ver.outputs.VN }}（versionCode ${{ steps.ver.outputs.VC }}）
 
             固定下载地址（手机浏览器打开即下）：
             https://github.com/chenziangloves/jizhang-android/releases/latest/download/jizhang-latest.apk
@@ -138,7 +141,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: unsigned-${{ github.run_number }}
-          name: 记账本 v${{ env.VN }}（未签名预览 build ${{ github.run_number }}）
+          name: 记账本 v${{ steps.ver.outputs.VN }}（未签名预览 build ${{ github.run_number }})
           prerelease: true
           files: app/build/outputs/apk/release/app-release-unsigned.apk
           body: |
