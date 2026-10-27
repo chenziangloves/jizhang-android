@@ -25,11 +25,26 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # 不用 android-actions/setup-android：它会跑 `sdkmanager tools`，
+      # 而 Google 已把 tools 包下线，导致 "Failed to find package 'tools'" 直接失败。
+      # ubuntu runner 自带 Android SDK，这里只把 cmdline-tools 加进 PATH 并补装需要的包。
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK packages
-        run: sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "SDK=$SDK"
+          SDKM="$(ls -d "$SDK"/cmdline-tools/*/bin 2>/dev/null | head -1)"
+          if [ -z "$SDKM" ]; then
+            echo "没找到 cmdline-tools，落回 PATH 里的 sdkmanager"
+          else
+            echo "$SDKM" >> "$GITHUB_PATH"
+            export PATH="$SDKM:$PATH"
+          fi
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          which sdkmanager || true
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
