@@ -16,6 +16,11 @@ val keystoreProps = Properties().apply {
 }
 val hasSigning = keystorePropsFile.exists()
 
+// 版本号：CI 用 -PappVersionCode / -PappVersionName 传入，保证每次构建都比上一版大，
+// 手机才能「覆盖安装」而不是要求卸载。本地构建用下面的默认值。
+val appVersionCode = (rootProject.findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 12
+val appVersionName = (rootProject.findProperty("appVersionName") as String?) ?: "1.2.0"
+
 android {
     namespace = "com.chenziang.jizhang"
     compileSdk = 34
@@ -24,8 +29,8 @@ android {
         applicationId = "com.chenziang.jizhang"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = appVersionCode
+        versionName = appVersionName
     }
 
     signingConfigs {

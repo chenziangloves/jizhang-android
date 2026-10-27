@@ -3,8 +3,12 @@ package com.chenziang.jizhang;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -26,15 +30,23 @@ import android.widget.Toast;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 
 public class MainActivity extends Activity {
 
     private static final int REQ_FILE_CHOOSER = 1001;
     private static final String START_URL =
             "https://appassets.androidplatform.net/assets/www/index.html";
+    /** 自动备份文件名：同时存在于 App 私有目录和「下载/记账本备份」里，卸载重装也能捞回来 */
+    private static final String AUTO_BACKUP_NAME = "jizhang-autobackup.json";
 
     private WebView webView;
     private ValueCallback<Uri[]> pendingFileCallback;
@@ -103,10 +115,24 @@ public class MainActivity extends Activity {
         });
 
         if (savedInstanceState == null) {
-            webView.loadUrl(START_URL);
+            webView.loadUrl(startUrl());
         } else {
             webView.restoreState(savedInstanceState);
         }
+    }
+
+    /**
+     * 带上版本号的入口地址：每次升级都会强制重新读一遍包内资源，
+     * 避免 WebView 缓存让新版本还在跑旧界面。数据按 origin 存，不受影响。
+     */
+    private String startUrl() {
+        String v = "0";
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (pi.versionName != null && !pi.versionName.isEmpty()) v = pi.versionName;
+        } catch (Exception ignored) {
+        }
+        return START_URL + "?v=" + Uri.encode(v);
     }
 
     @Override
@@ -253,6 +279,164 @@ public class MainActivity extends Activity {
             fos.write(bytes);
             fos.close();
             return target.getAbsolutePath();
+        }
+
+        /* ---------- 版本信息 ---------- */
+
+        @JavascriptInterface
+        public String appInfo() {
+            JSONObject o = new JSONObject();
+            try {
+                PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+                o.put("versionName", pi.versionName == null ? "" : pi.versionName);
+                o.put("versionCode", pi.versionCode);
+                o.put("packageName", getPackageName());
+                o.put("sdk", Build.VERSION.SDK_INT);
+                File f = autoBackupFile();
+                o.put("backupAt", f.exists() ? f.lastModified() : 0L);
+                o.put("backupBytes", f.exists() ? f.length() : 0L);
+            } catch (Exception ignored) {
+            }
+            return o.toString();
+        }
+
+        /* ---------- 自动备份 ---------- */
+
+        @JavascriptInterface
+        public void autoBackup(final String json) {
+            if (json == null || json.length() < 20) return;
+            final byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+            new Thread(() -> {
+                try {
+                    File target = autoBackupFile();
+                    File tmp = new File(target.getAbsolutePath() + ".tmp");
+                    FileOutputStream fos = new FileOutputStream(tmp);
+                    fos.write(bytes);
+                    fos.flush();
+                    fos.close();
+                    if (target.exists()) {
+                        //noinspection ResultOfMethodCallIgnored
+                        target.delete();
+                    }
+                    if (!tmp.renameTo(target)) {
+                        FileOutputStream f2 = new FileOutputStream(target);
+                        f2.write(bytes);
+                        f2.close();
+                        //noinspection ResultOfMethodCallIgnored
+                        tmp.delete();
+                    }
+                } catch (Exception ignored) {
+                }
+                try {
+                    mirrorBackupToDownloads(bytes);
+                } catch (Exception ignored) {
+                }
+            }).start();
+        }
+
+        @JavascriptInterface
+        public String loadBackup() {
+            try {
+                File f = autoBackupFile();
+                if (f.exists() && f.length() > 2) {
+                    FileInputStream fis = new FileInputStream(f);
+                    String s = readStream(fis);
+                    if (s != null && s.length() > 2) return s;
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                String s = readBackupFromDownloads();
+                if (s != null && s.length() > 2) return s;
+            } catch (Exception ignored) {
+            }
+            return "";
+        }
+
+        private File autoBackupFile() {
+            File base = getExternalFilesDir(null);
+            if (base == null) base = getFilesDir();
+            File dir = new File(base, "backup");
+            if (!dir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+            return new File(dir, AUTO_BACKUP_NAME);
+        }
+
+        /** 同时往「下载/记账本备份」放一份，卸载 App 也不会丢 */
+        private void mirrorBackupToDownloads(byte[] bytes) throws Exception {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return;
+            ContentResolver cr = getContentResolver();
+            Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+            try {
+                cr.delete(collection,
+                        MediaStore.MediaColumns.DISPLAY_NAME + "=?",
+                        new String[]{AUTO_BACKUP_NAME});
+            } catch (Exception ignored) {
+            }
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, AUTO_BACKUP_NAME);
+            cv.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+            cv.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS + "/记账本备份");
+            Uri uri = cr.insert(collection, cv);
+            if (uri == null) return;
+            OutputStream os = cr.openOutputStream(uri, "wt");
+            if (os == null) return;
+            os.write(bytes);
+            os.flush();
+            os.close();
+        }
+
+        private String readBackupFromDownloads() {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null;
+            try {
+                ContentResolver cr = getContentResolver();
+                Uri collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                String[] proj = {MediaStore.MediaColumns._ID};
+                Cursor c = cr.query(collection, proj,
+                        MediaStore.MediaColumns.DISPLAY_NAME + "=?",
+                        new String[]{AUTO_BACKUP_NAME},
+                        MediaStore.MediaColumns.DATE_MODIFIED + " DESC");
+                if (c == null) return null;
+                try {
+                    if (!c.moveToFirst()) return null;
+                    Uri uri = ContentUris.withAppendedId(collection, c.getLong(0));
+                    InputStream in = cr.openInputStream(uri);
+                    if (in == null) return null;
+                    return readStream(in);
+                } finally {
+                    c.close();
+                }
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+
+        private String readStream(InputStream in) throws Exception {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            in.close();
+            return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        }
+
+        /* ---------- 打开外链（下载更新包） ---------- */
+
+        @JavascriptInterface
+        public void openUrl(final String url) {
+            if (url == null || url.isEmpty()) return;
+            runOnUiThread(() -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(i);
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "没有找到可用的浏览器", Toast.LENGTH_SHORT).show();
+                }
+            });
         }
     }
 }

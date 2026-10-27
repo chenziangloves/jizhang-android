@@ -46,6 +46,16 @@ jobs:
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
+      # 版本号自动递增：versionCode 用「1000 + 构建序号」，保证永远比手机里装的大，
+      # 这样系统才会走「覆盖安装」而不是拒绝安装。versionName 形如 1.2.37。
+      - name: Compute version
+        run: |
+          VC=$((1000 + ${{ github.run_number }}))
+          VN="1.2.${{ github.run_number }}"
+          echo "VC=$VC" >> "$GITHUB_ENV"
+          echo "VN=$VN" >> "$GITHUB_ENV"
+          echo "本次版本：$VN (versionCode=$VC)"
+
       # 从 Secrets 还原固定签名密钥（不进仓库），现场写 keystore.properties 供 Gradle 读取。
       # 未配置 Secrets 时不报错：改出未签名包（preview），由本地 apksigner 补签。
       - name: Detect signing secrets
@@ -81,9 +91,9 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build release APK
-        run: gradle :app:assembleRelease --no-daemon --stacktrace
+        run: gradle :app:assembleRelease --no-daemon --stacktrace -PappVersionCode=$VC -PappVersionName=$VN
 
-      # 校验签名，避免出现「未签名包被当正式包发出去」
+      # 校验签名与版本号，避免出现「未签名包被当正式包发出去」
       - name: Verify signature
         if: env.HAS_KS == 'true'
         run: |
@@ -92,6 +102,8 @@ jobs:
           APKSIGNER="$SDK/build-tools/34.0.0/apksigner"
           APK="app/build/outputs/apk/release/app-release.apk"
           "$APKSIGNER" verify --print-certs "$APK"
+          echo "--- 版本 ---"
+          "$SDK/build-tools/34.0.0/aapt" dump badging "$APK" | head -1
           echo "--- 包内网页资源 ---"
           unzip -l "$APK" | grep 'assets/www' || true
 
@@ -102,24 +114,32 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
+      # 正式签名版：资产名固定为 jizhang-latest.apk，
+      # 于是 releases/latest/download/jizhang-latest.apk 永远指向最新版，链接不变。
       - name: Publish signed release
         if: env.HAS_KS == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
-          name: 记账本 v1.1（正式签名）build ${{ github.run_number }}
-          files: app/build/outputs/apk/release/app-release.apk#jizhang-1.1-release.apk
+          tag_name: v${{ env.VN }}
+          name: 记账本 v${{ env.VN }}
+          prerelease: false
+          files: app/build/outputs/apk/release/app-release.apk#jizhang-latest.apk
           body: |
-            记账本 Android 版，已用固定密钥正式签名，后续版本可直接覆盖升级，无需卸载。
+            记账本 Android 版 v${{ env.VN }}（versionCode ${{ env.VC }}）
 
-            安装提示：如果之前装过 debug 版，需先卸载——两者签名不同，系统不允许互相覆盖。
+            固定下载地址（手机浏览器打开即下）：
+            https://github.com/chenziangloves/jizhang-android/releases/latest/download/jizhang-latest.apk
 
+            直接覆盖安装即可，账本数据不会丢失；装完在「设置 → 检查更新」能看到版本号变化。
+
+      # 未签名产物只做预览，标记为 prerelease，避免它抢走 releases/latest
       - name: Publish unsigned preview
         if: env.HAS_KS != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: unsigned-${{ github.run_number }}
-          name: 记账本 v1.1（未签名预览）build ${{ github.run_number }}
+          name: 记账本 v${{ env.VN }}（未签名预览 build ${{ github.run_number }}）
+          prerelease: true
           files: app/build/outputs/apk/release/app-release-unsigned.apk
           body: |
             未签名的构建产物，仅用于本地补签，不能直接安装。

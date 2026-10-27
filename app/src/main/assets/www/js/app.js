@@ -379,6 +379,15 @@
         '<span class="a-main">导入恢复<span class="a-sub">从备份文件还原（会覆盖当前所有数据）</span></span>' +
         '<span class="a-arrow">›</span>' +
       '</button>' +
+      '<div class="action-row static">' +
+        '<span class="a-icon">🛡️</span>' +
+        '<span class="a-main">自动备份<span class="a-sub">' + esc(autoBackupText()) + '</span></span>' +
+      '</div>' +
+      '<button class="action-row" data-act="check-update" type="button">' +
+        '<span class="a-icon">🔄</span>' +
+        '<span class="a-main">检查更新<span class="a-sub">当前版本 ' + esc(versionText()) + '</span></span>' +
+        '<span class="a-arrow">›</span>' +
+      '</button>' +
       '<button class="action-row danger" data-act="clear-records" type="button">' +
         '<span class="a-icon">🗑️</span>' +
         '<span class="a-main">清空所有账单<span class="a-sub">保留分类，删除全部收支记录</span></span>' +
@@ -392,7 +401,7 @@
     '</div>';
 
     html += '<div class="foot-note">' +
-      '记账本 · 本地版 v1.0<br>' +
+      '记账本 · 本地版 ' + esc(versionText()) + '<br>' +
       '共 ' + state.allRecords.length + ' 笔记录 · ' + state.categories.length + ' 个分类' +
     '</div>';
 
@@ -796,6 +805,118 @@
     input.click();
   }
 
+  /* ================= 版本 / 更新 / 自动备份 ================= */
+
+  function nativeOk() {
+    return !!(window.JZ && window.JZ.available && window.JZ.available());
+  }
+
+  function appInfo() {
+    return nativeOk() ? window.JZ.info() : null;
+  }
+
+  function versionText() {
+    var info = appInfo();
+    if (info && info.versionName) return 'v' + info.versionName;
+    return 'v1.2（网页版）';
+  }
+
+  function fmtStamp(ts) {
+    var d = new Date(ts);
+    var hm = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    if (toDateStr(d) === todayStr()) return '今天 ' + hm;
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
+  }
+
+  function autoBackupText() {
+    if (!nativeOk()) return '装成 App 后自动生效，浏览器里不会写文件';
+    var at = window.JZ.lastBackupAt();
+    return at ? '已开启 · 最近 ' + fmtStamp(at) : '已开启 · 等你记第一笔';
+  }
+
+  function cmpVer(a, b) {
+    var pa = String(a).split('.'), pb = String(b).split('.');
+    var n = Math.max(pa.length, pb.length);
+    for (var i = 0; i < n; i++) {
+      var x = parseInt(pa[i], 10) || 0;
+      var y = parseInt(pb[i], 10) || 0;
+      if (x > y) return 1;
+      if (x < y) return -1;
+    }
+    return 0;
+  }
+
+  function doCheckUpdate() {
+    var info = appInfo();
+    if (!info) { toast('网页版会自动拿到最新代码，无需更新'); return; }
+    var cur = String(info.versionName || '0');
+    toast('正在检查更新…');
+
+    fetch('https://api.github.com/repos/chenziangloves/jizhang-android/releases/latest', {
+      headers: { 'Accept': 'application/vnd.github+json' },
+      cache: 'no-store'
+    }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (d) {
+      var tag = String(d.tag_name || '').replace(/^v/, '');
+      var apk = (d.assets || []).filter(function (a) { return /\.apk$/i.test(a.name); })[0];
+      if (!tag || !apk) { toast('没有找到可下载的安装包'); return; }
+      if (cmpVer(tag, cur) <= 0) { toast('已经是最新版本 v' + cur); return; }
+
+      openDialog(
+        '<div class="dlg-title">发现新版本 v' + esc(tag) + '</div>' +
+        '<div class="dlg-desc">当前版本 v' + esc(cur) + '。<br>' +
+          '下载后点开安装即可<b>直接覆盖</b>，账本数据不会丢。' +
+          (String(d.body || '').trim() ? '<br><br>' + esc(String(d.body).trim()).replace(/\n/g, '<br>') : '') +
+        '</div>' +
+        '<div class="dlg-actions">' +
+          '<button class="dlg-btn" data-ok="0" type="button">稍后</button>' +
+          '<button class="dlg-btn primary" data-ok="1" type="button">去下载</button>' +
+        '</div>',
+        function (root) {
+          $$('[data-ok]', root).forEach(function (b) {
+            b.addEventListener('click', function () {
+              closeDialog();
+              if (b.dataset.ok === '1') window.JZ.openUrl(apk.browser_download_url);
+            });
+          });
+        }
+      );
+    }).catch(function (e) {
+      toast('检查更新失败：' + (e && e.message ? e.message : '网络不通'));
+    });
+  }
+
+  /** 首次启动时，如果本机账本是空的、但手机里有自动备份，就提示恢复 */
+  function maybeRestoreBackup() {
+    if (!nativeOk()) return;
+    if (localStorage.getItem('jz_skip_restore') === '1') return;
+    if (state.allRecords.length) return;
+
+    var raw = window.JZ.loadBackup();
+    if (!raw) return;
+
+    var data;
+    try { data = JSON.parse(raw); } catch (e) { return; }
+    if (!data || !Array.isArray(data.records) || !data.records.length) return;
+
+    var when = data.exportedAt ? fmtStamp(new Date(data.exportedAt).getTime()) : '上次使用';
+    askConfirm('发现之前的备份',
+      '这台手机里有一份 ' + when + ' 的自动备份，共 <b>' + data.records.length + '</b> 笔记录。<br>' +
+      '要把它们恢复到现在的账本里吗？',
+      '恢复备份', false
+    ).then(function (ok) {
+      if (!ok) { localStorage.setItem('jz_skip_restore', '1'); return; }
+      return DB.importAll(data).then(function (r) {
+        toast('已恢复 ' + r.records + ' 笔记录');
+        return refresh();
+      });
+    }).catch(function (e) {
+      toast('恢复失败：' + (e && e.message ? e.message : e));
+    });
+  }
+
   /* ================= Toast ================= */
 
   var toastTimer = null;
@@ -849,6 +970,7 @@
       else if (act === 'del-cat') { deleteCategoryFlow(el.dataset.id); }
       else if (act === 'export') { doExport(); }
       else if (act === 'import') { doImport(); }
+      else if (act === 'check-update') { doCheckUpdate(); }
       else if (act === 'clear-records') {
         askConfirm('清空所有账单？', '共 <b>' + state.allRecords.length + '</b> 笔记录将被删除，分类会保留。<br>此操作无法撤销。', '确认清空', true)
           .then(function (ok) {
@@ -928,7 +1050,14 @@
     bindGlobal();
     $$('.tab').forEach(function (t) { t.classList.toggle('on', t.dataset.view === 'home'); });
 
-    refresh();
+    refresh().then(maybeRestoreBackup);
+
+    // 自动备份完成时，若正在看设置页就刷新一下时间
+    if (window.JZ && window.JZ.onBackup) {
+      window.JZ.onBackup(function () {
+        if (state.view === 'settings') render();
+      });
+    }
 
     // 注册 Service Worker（PWA 离线可用）
     if ('serviceWorker' in navigator && location.protocol === 'https:') {

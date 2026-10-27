@@ -35,6 +35,15 @@
 
   var dbPromise = null;
 
+  /* 数据一变就通知上层：安卓外壳据此做自动备份（浏览器里是空操作） */
+  function touch() {
+    try {
+      if (global.JZ && typeof global.JZ.scheduleBackup === 'function') {
+        global.JZ.scheduleBackup('write');
+      }
+    } catch (e) { /* ignore */ }
+  }
+
   function open() {
     if (dbPromise) return dbPromise;
     dbPromise = new Promise(function (resolve, reject) {
@@ -110,7 +119,7 @@
     if (!cat.id) cat.id = uid('c');
     return store(S_CATS, 'readwrite')
       .then(function (s) { return wrap(s.put(cat)); })
-      .then(function () { return cat; });
+      .then(function () { touch(); return cat; });
   }
 
   function deleteCategory(id) {
@@ -133,7 +142,7 @@
           }
         };
 
-        t.oncomplete = function () { resolve(true); };
+        t.oncomplete = function () { touch(); resolve(true); };
         t.onerror = function () { reject(t.error); };
       });
     });
@@ -170,12 +179,13 @@
     if (!rec.createdAt) rec.createdAt = now;
     return store(S_RECORDS, 'readwrite')
       .then(function (s) { return wrap(s.put(rec)); })
-      .then(function () { return rec; });
+      .then(function () { touch(); return rec; });
   }
 
   function deleteRecord(id) {
     return store(S_RECORDS, 'readwrite')
-      .then(function (s) { return wrap(s.delete(id)); });
+      .then(function (s) { return wrap(s.delete(id)); })
+      .then(function () { touch(); });
   }
 
   /* ---------- 备份 ---------- */
@@ -234,6 +244,7 @@
         });
 
         t.oncomplete = function () {
+          touch();
           resolve({ records: data.records.length, categories: cats.length });
         };
         t.onerror = function () { reject(t.error); };
@@ -242,7 +253,9 @@
   }
 
   function clearRecords() {
-    return store(S_RECORDS, 'readwrite').then(function (s) { return wrap(s.clear()); });
+    return store(S_RECORDS, 'readwrite')
+      .then(function (s) { return wrap(s.clear()); })
+      .then(function () { touch(); });
   }
 
   function resetAll() {
@@ -253,7 +266,7 @@
         var cs = t.objectStore(S_CATS);
         cs.clear();
         PRESET_CATEGORIES.forEach(function (c) { cs.put(c); });
-        t.oncomplete = function () { resolve(true); };
+        t.oncomplete = function () { touch(); resolve(true); };
         t.onerror = function () { reject(t.error); };
       });
     });

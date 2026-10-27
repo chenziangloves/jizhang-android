@@ -789,6 +789,8 @@ input { font-family: inherit; }
 .action-row .a-sub { font-size: 12.5px; color: var(--text3); margin-top: 1px; }
 .action-row .a-arrow { color: #c8ced8; font-size: 17px; }
 .action-row.danger .a-main { color: var(--expense); }
+.action-row.static { cursor: default; }
+.action-row.static:active { background: none; }
 
 .tip-box {
   margin: 14px 16px 0;
