@@ -30,6 +30,7 @@ import android.widget.Toast;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -38,7 +39,15 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
+import java.net.URL;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import javax.net.ssl.SSLException;
 
 public class MainActivity extends Activity {
 
@@ -51,6 +60,11 @@ public class MainActivity extends Activity {
     private WebView webView;
     private ValueCallback<Uri[]> pendingFileCallback;
     private long lastBackPress = 0L;
+
+    /** 「检查更新」的异步结果表：JS 侧靠轮询取回，避免在主线程做网络请求 */
+    private final Map<String, String> updateResults = new ConcurrentHashMap<>();
+    /** 更新包下载进度（0-100，-1 表示失败），JS 侧轮询展示 */
+    private volatile int downloadProgress = -1;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -438,5 +452,183 @@ public class MainActivity extends Activity {
                 }
             });
         }
+
+        /* ---------- 检查更新（原生请求，绕开 WebView 的跨域限制） ---------- */
+
+        /**
+         * 发起一次版本检查，立刻返回一个查询号。
+         * 真正的网络请求在后台线程里做，JS 侧用 pollCheckUpdate 轮询结果。
+         * 之所以不在 JS 里直接 fetch：WebView 从 appassets 这个虚拟域名发跨域请求
+         * 在很多机型上会被 CORS 拦掉（表现为 "Failed to fetch"），原生请求没有这个限制。
+         */
+        @JavascriptInterface
+        public String startCheckUpdate() {
+            String rid = "u" + System.currentTimeMillis();
+            updateResults.put(rid, "{\"state\":\"pending\"}");
+            new Thread(() -> {
+                String out;
+                try {
+                    out = fetchLatestRelease();
+                } catch (Throwable t) {
+                    out = "{\"state\":\"done\",\"ok\":false,\"kind\":\"unknown\",\"error\":\""
+                            + escapeJson(String.valueOf(t.getMessage())) + "\"}";
+                }
+                updateResults.put(rid, out);
+            }).start();
+            // 结果表只留最近 8 次，避免长时间运行后无限增长
+            if (updateResults.size() > 8) {
+                Iterator<String> it = updateResults.keySet().iterator();
+                int drop = updateResults.size() - 8;
+                while (it.hasNext() && drop > 0) {
+                    it.next();
+                    it.remove();
+                    drop--;
+                }
+            }
+            return rid;
+        }
+
+        @JavascriptInterface
+        public String pollCheckUpdate(String rid) {
+            if (rid == null) return "{\"state\":\"missing\"}";
+            String v = updateResults.get(rid);
+            return v == null ? "{\"state\":\"missing\"}" : v;
+        }
+
+        /** 真正的版本查询：短超时 + 一次重试 + 错误归类，国产网络环境下最稳的组合 */
+        private String fetchLatestRelease() {
+            final String url = "https://api.github.com/repos/chenziangloves/jizhang-android/releases/latest";
+            String lastKind = "unknown";
+            String lastMsg = "网络不通";
+
+            for (int attempt = 1; attempt <= 2; attempt++) {
+                HttpURLConnection conn = null;
+                try {
+                    URL u = new URL(url);
+                    conn = (HttpURLConnection) u.openConnection();
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(7000);
+                    conn.setReadTimeout(7000);
+                    conn.setInstanceFollowRedirects(true);
+                    conn.setUseCaches(false);
+                    // GitHub 对没有 UA 的请求会直接拒绝，必须显式带上
+                    conn.setRequestProperty("User-Agent", "JiZhang-Android/" + versionNameSafe());
+                    conn.setRequestProperty("Accept", "application/vnd.github+json");
+                    conn.setRequestProperty("Cache-Control", "no-cache");
+
+                    int code = conn.getResponseCode();
+                    if (code == 200) {
+                        InputStream in = conn.getInputStream();
+                        String body = readStream(in);
+                        return parseRelease(body);
+                    }
+                    if (code == 403 || code == 429) {
+                        lastKind = "ratelimit";
+                        lastMsg = "GitHub 接口访问过于频繁（HTTP " + code + "），请过几分钟再试";
+                        if (code == 403) break; // 限流重试无意义
+                    } else if (code == 404) {
+                        lastKind = "notfound";
+                        lastMsg = "找不到发布记录（HTTP 404）";
+                        break;
+                    } else {
+                        lastKind = "http";
+                        lastMsg = "服务器返回 HTTP " + code;
+                    }
+                } catch (UnknownHostException e) {
+                    lastKind = "dns";
+                    lastMsg = "域名 api.github.com 解析失败，请检查网络或 VPN 是否已连接";
+                } catch (SocketTimeoutException e) {
+                    lastKind = "timeout";
+                    lastMsg = "连接 api.github.com 超时，当前网络可能无法稳定访问 GitHub";
+                } catch (SSLException e) {
+                    lastKind = "ssl";
+                    lastMsg = "HTTPS 握手失败，网络可能被拦截";
+                } catch (Exception e) {
+                    lastKind = "connect";
+                    lastMsg = "网络请求失败：" + String.valueOf(e.getMessage());
+                } finally {
+                    if (conn != null) conn.disconnect();
+                }
+
+                if (attempt == 1) {
+                    try { Thread.sleep(800); } catch (InterruptedException ignored) { }
+                }
+            }
+
+            return "{\"state\":\"done\",\"ok\":false,\"kind\":\"" + escapeJson(lastKind)
+                    + "\",\"error\":\"" + escapeJson(lastMsg) + "\"}";
+        }
+
+        /** 把 GitHub 的 release JSON 精简成网页需要的那几个字段 */
+        private String parseRelease(String body) {
+            try {
+                JSONObject d = new JSONObject(body);
+                String tag = d.optString("tag_name", "");
+                if (tag.isEmpty()) {
+                    return "{\"state\":\"done\",\"ok\":false,\"kind\":\"parse\",\"error\":\"返回内容里没有版本号\"}";
+                }
+                String apkName = "";
+                String apkUrl = "";
+                long apkSize = 0;
+                JSONArray assets = d.optJSONArray("assets");
+                if (assets != null) {
+                    for (int i = 0; i < assets.length(); i++) {
+                        JSONObject a = assets.optJSONObject(i);
+                        if (a == null) continue;
+                        String name = a.optString("name", "");
+                        if (name.toLowerCase().endsWith(".apk")) {
+                            apkName = name;
+                            apkUrl = a.optString("browser_download_url", "");
+                            apkSize = a.optLong("size", 0);
+                            break;
+                        }
+                    }
+                }
+                JSONObject o = new JSONObject();
+                o.put("state", "done");
+                o.put("ok", true);
+                o.put("tag", tag);
+                o.put("apkName", apkName);
+                o.put("apkUrl", apkUrl);
+                o.put("apkSize", apkSize);
+                o.put("notes", d.optString("body", ""));
+                o.put("pageUrl", d.optString("html_url", ""));
+                o.put("publishedAt", d.optString("published_at", ""));
+                return o.toString();
+            } catch (Exception e) {
+                return "{\"state\":\"done\",\"ok\":false,\"kind\":\"parse\",\"error\":\"返回内容无法解析\"}";
+            }
+        }
+
+        private String versionNameSafe() {
+            try {
+                PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+                return pi.versionName == null ? "0" : pi.versionName;
+            } catch (Exception e) {
+                return "0";
+            }
+        }
+    }
+
+    private static String escapeJson(String s) {
+        if (s == null) return "";
+        StringBuilder b = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': b.append("\\\""); break;
+                case '\\': b.append("\\\\"); break;
+                case '\n': b.append("\\n"); break;
+                case '\r': b.append("\\r"); break;
+                case '\t': b.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        b.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        b.append(c);
+                    }
+            }
+        }
+        return b.toString();
     }
 }

@@ -47,9 +47,55 @@
     return true;
   }
 
+  /* ---------- 检查更新（走原生 HTTP，绕开 WebView 跨域） ---------- */
+
+  /**
+   * 返回 Promise：
+   *   成功 → { ok:true, tag, apkName, apkUrl, apkSize, notes, pageUrl }
+   *   失败 → { ok:false, kind, error }
+   * 原生不可用（纯网页版）或原生接口缺失时，resolve(null) 交给调用方降级。
+   */
+  function checkUpdate() {
+    if (!bridge || typeof bridge.startCheckUpdate !== 'function') {
+      return Promise.resolve(null);
+    }
+    var rid;
+    try {
+      rid = bridge.startCheckUpdate();
+    } catch (e) {
+      return Promise.resolve(null);
+    }
+    if (!rid) return Promise.resolve(null);
+
+    return new Promise(function (resolve) {
+      var tries = 0;
+      var MAX = 60;            // 60 × 250ms = 15 秒，超时就当失败
+      var timer = setInterval(function () {
+        tries++;
+        var raw = null;
+        try { raw = bridge.pollCheckUpdate(rid); } catch (e) { raw = null; }
+        var d = safeJson(raw, null);
+
+        if (d && d.state === 'done') {
+          clearInterval(timer);
+          resolve(d);
+          return;
+        }
+        if (d && d.state === 'missing') {
+          clearInterval(timer);
+          resolve({ ok: false, kind: 'missing', error: '检查任务丢失，请重试' });
+          return;
+        }
+        if (tries >= MAX) {
+          clearInterval(timer);
+          resolve({ ok: false, kind: 'timeout', error: '等待响应超时，当前网络可能无法访问 GitHub' });
+        }
+      }, 250);
+    });
+  }
+
   /* ---------- 自动备份 ---------- */
-  function notify(msg) {
-    for (var i = 0; i < watchers.length; i++) {
+  function notify(msg) {    for (var i = 0; i < watchers.length; i++) {
       try { watchers[i](msg); } catch (e) { /* ignore */ }
     }
   }
@@ -150,6 +196,7 @@
     available: available,
     info: info,
     openUrl: openUrl,
+    checkUpdate: checkUpdate,
     showToast: function (m) { call('toast', String(m)); },
     scheduleBackup: scheduleBackup,
     backupNow: backupNow,

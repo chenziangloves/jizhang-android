@@ -388,6 +388,11 @@
         '<span class="a-main">检查更新<span class="a-sub">当前版本 ' + esc(versionText()) + '</span></span>' +
         '<span class="a-arrow">›</span>' +
       '</button>' +
+      '<button class="action-row" data-act="download-page" type="button">' +
+        '<span class="a-icon">⬇️</span>' +
+        '<span class="a-main">手动下载最新版<span class="a-sub">检查更新失败时用这个，用浏览器打开下载页</span></span>' +
+        '<span class="a-arrow">›</span>' +
+      '</button>' +
       '<button class="action-row danger" data-act="clear-records" type="button">' +
         '<span class="a-icon">🗑️</span>' +
         '<span class="a-main">清空所有账单<span class="a-sub">保留分类，删除全部收支记录</span></span>' +
@@ -850,46 +855,114 @@
     return 0;
   }
 
+  /* GitHub 的发布页与固定下载地址（不依赖 API，API 挂了也能手动更新） */
+  var REPO_PAGE = 'https://github.com/chenziangloves/jizhang-android/releases/latest';
+  var APK_URL = REPO_PAGE + '/download/jizhang-latest.apk';
+
+  var FAIL_HINT = {
+    dns: '域名没能解析，通常是网络或 VPN 没连上。',
+    timeout: '连接超时，当前网络到 GitHub 太慢或被拦。',
+    ssl: 'HTTPS 握手被中断，中间可能有网络干扰。',
+    connect: '连接被中断，网络不稳定。',
+    ratelimit: 'GitHub 接口的访问次数用完了（同一个出口 IP 共享额度），过几分钟再试。',
+    http: 'GitHub 返回了异常状态码。',
+    parse: '返回的内容解析不了，可能被中间设备改写。',
+    missing: '检查任务丢失了，重试一次就行。',
+    unknown: '出现了未知错误。'
+  };
+
+  function openUpdatePage() {
+    if (window.JZ && window.JZ.openUrl) { window.JZ.openUrl(REPO_PAGE); return; }
+    window.open(REPO_PAGE, '_blank');
+  }
+
   function doCheckUpdate() {
     var info = appInfo();
     if (!info) { toast('网页版会自动拿到最新代码，无需更新'); return; }
     var cur = String(info.versionName || '0');
     toast('正在检查更新…');
 
-    fetch('https://api.github.com/repos/chenziangloves/jizhang-android/releases/latest', {
-      headers: { 'Accept': 'application/vnd.github+json' },
-      cache: 'no-store'
+    // 优先走原生请求：WebView 里直接 fetch 跨域常被拦成 "Failed to fetch"
+    var p = (window.JZ && window.JZ.checkUpdate) ? window.JZ.checkUpdate() : Promise.resolve(null);
+
+    p.then(function (res) {
+      if (res === null) { viaFetch(cur); return; }   // 老版本 App 没有原生接口 → 退回 fetch
+      if (!res.ok) { showUpdateFailed(cur, res); return; }
+      showUpdateResult(cur, res.tag, res.apkUrl, res.notes, res.apkSize);
+    }).catch(function () {
+      viaFetch(cur);
+    });
+  }
+
+  /** 老 App / 纯网页的退路：浏览器原生 fetch（用 Promise 包一层，连 fetch 不存在也不会崩） */
+  function viaFetch(cur) {
+    Promise.resolve().then(function () {
+      if (typeof fetch !== 'function') throw new Error('当前环境不支持网络请求');
+      return fetch('https://api.github.com/repos/chenziangloves/jizhang-android/releases/latest', {
+        headers: { 'Accept': 'application/vnd.github+json' },
+        cache: 'no-store'
+      });
     }).then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     }).then(function (d) {
-      var tag = String(d.tag_name || '').replace(/^v/, '');
       var apk = (d.assets || []).filter(function (a) { return /\.apk$/i.test(a.name); })[0];
-      if (!tag || !apk) { toast('没有找到可下载的安装包'); return; }
-      if (cmpVer(tag, cur) <= 0) { toast('已经是最新版本 v' + cur); return; }
-
-      openDialog(
-        '<div class="dlg-title">发现新版本 v' + esc(tag) + '</div>' +
-        '<div class="dlg-desc">当前版本 v' + esc(cur) + '。<br>' +
-          '下载后点开安装即可<b>直接覆盖</b>，账本数据不会丢。' +
-          (String(d.body || '').trim() ? '<br><br>' + esc(String(d.body).trim()).replace(/\n/g, '<br>') : '') +
-        '</div>' +
-        '<div class="dlg-actions">' +
-          '<button class="dlg-btn" data-ok="0" type="button">稍后</button>' +
-          '<button class="dlg-btn primary" data-ok="1" type="button">去下载</button>' +
-        '</div>',
-        function (root) {
-          $$('[data-ok]', root).forEach(function (b) {
-            b.addEventListener('click', function () {
-              closeDialog();
-              if (b.dataset.ok === '1') window.JZ.openUrl(apk.browser_download_url);
-            });
-          });
-        }
-      );
+      showUpdateResult(cur, d.tag_name, apk ? apk.browser_download_url : APK_URL, d.body, apk ? apk.size : 0);
     }).catch(function (e) {
-      toast('检查更新失败：' + (e && e.message ? e.message : '网络不通'));
+      showUpdateFailed(cur, { kind: 'unknown', error: (e && e.message) || '网络不通' });
     });
+  }
+
+  function showUpdateResult(cur, tagRaw, apkUrl, notes, apkSize) {
+    var tag = String(tagRaw || '').replace(/^v/, '');
+    if (!tag) { toast('没有找到可下载的安装包'); return; }
+    if (cmpVer(tag, cur) <= 0) { toast('已经是最新版本 v' + cur); return; }
+
+    var sizeText = apkSize > 0 ? '（' + (apkSize / 1048576).toFixed(2) + ' MB）' : '';
+    openDialog(
+      '<div class="dlg-title">发现新版本 v' + esc(tag) + '</div>' +
+      '<div class="dlg-desc">当前版本 v' + esc(cur) + '。<br>' +
+        '下载' + sizeText + '后点开安装即可<b>直接覆盖</b>，账本数据不会丢。' +
+        (String(notes || '').trim() ? '<br><br>' + esc(String(notes).trim()).replace(/\n/g, '<br>') : '') +
+      '</div>' +
+      '<div class="dlg-actions">' +
+        '<button class="dlg-btn" data-ok="0" type="button">稍后</button>' +
+        '<button class="dlg-btn primary" data-ok="1" type="button">去下载</button>' +
+      '</div>',
+      function (root) {
+        $$('[data-ok]', root).forEach(function (b) {
+          b.addEventListener('click', function () {
+            closeDialog();
+            if (b.dataset.ok === '1') window.JZ.openUrl(apkUrl || APK_URL);
+          });
+        });
+      }
+    );
+  }
+
+  function showUpdateFailed(cur, res) {
+    var hint = FAIL_HINT[res.kind] || FAIL_HINT.unknown;
+    openDialog(
+      '<div class="dlg-title">没能检查到新版本</div>' +
+      '<div class="dlg-desc">' +
+        '当前版本 v' + esc(cur) + '。<br>' +
+        esc(res.error || '网络不通') + '<br>' +
+        '<span style="color:var(--text3)">' + esc(hint) + '</span>' +
+      '</div>' +
+      '<div class="dlg-actions">' +
+        '<button class="dlg-btn" data-ok="0" type="button">重试</button>' +
+        '<button class="dlg-btn primary" data-ok="1" type="button">用浏览器下载</button>' +
+      '</div>',
+      function (root) {
+        $$('[data-ok]', root).forEach(function (b) {
+          b.addEventListener('click', function () {
+            closeDialog();
+            if (b.dataset.ok === '1') openUpdatePage();
+            else setTimeout(doCheckUpdate, 300);
+          });
+        });
+      }
+    );
   }
 
   /** 首次启动时，如果本机账本是空的、但手机里有自动备份，就提示恢复 */
@@ -975,6 +1048,7 @@
       else if (act === 'export') { doExport(); }
       else if (act === 'import') { doImport(); }
       else if (act === 'check-update') { doCheckUpdate(); }
+      else if (act === 'download-page') { openUpdatePage(); }
       else if (act === 'clear-records') {
         askConfirm('清空所有账单？', '共 <b>' + state.allRecords.length + '</b> 笔记录将被删除，分类会保留。<br>此操作无法撤销。', '确认清空', true)
           .then(function (ok) {
