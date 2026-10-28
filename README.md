@@ -78,17 +78,35 @@ git -C android push
 | `JZ.info()` | `{versionName, versionCode, backupAt, ...}` |
 | `JZ.autoBackup(json)` | 写自动备份（数据一变就触发，节流 4 秒） |
 | `JZ.loadBackup()` | 读回最近一次自动备份 |
+| `JZ.listSnapshots()` | 列出备份历史 `[{name, at, records, bytes}]`，第一条是最新 |
+| `JZ.loadSnapshot(name)` | 读某一份备份；`name` 传 `latest` 读最新 |
+| `JZ.pinSnapshot()` | 把当前备份钉成一份历史快照（恢复旧备份前先调） |
+| `JZ.checkUpdate()` | 走原生 HTTP 查版本，返回 Promise |
 | `JZ.openUrl(url)` | 用系统浏览器打开（更新下载用） |
 | `JZ.showToast(msg)` | 原生 Toast |
 
-底层 Java 接口：`appInfo` / `autoBackup` / `loadBackup` / `openUrl` / `saveFile` / `toast`。
+底层 Java 接口：`appInfo` / `autoBackup` / `loadBackup` / `listSnapshots` / `loadSnapshot` / `pinSnapshot` / `startCheckUpdate` / `pollCheckUpdate` / `openUrl` / `saveFile` / `toast`。
 
 ## 自动备份落在哪
 
-1. `Android/data/com.chenziang.jizhang/files/backup/jizhang-autobackup.json`（随 App 更新保留）
-2. `下载/记账本备份/jizhang-autobackup.json`（**卸载 App 也不丢**）
+1. `Android/data/com.chenziang.jizhang/files/backup/jizhang-autobackup.json` —— 永远是最新一份
+2. `Android/data/com.chenziang.jizhang/files/backup/history/*.json` —— **历史快照，最多 10 份**
+3. `下载/记账本备份/jizhang-autobackup.json`（**卸载 App 也不丢**）
+
+历史快照什么时候产生（只在两种情况下，不会每记一笔就堆一个文件）：
+
+- **记录条数变少了** —— 说明刚发生删除或清空，这时先把「删之前」那份存起来，误删才有得救；
+- **距离上一份超过 6 小时** —— 当时间机器用，最多丢半天。
+
+设置页「自动备份」点进去能看到每一份的时间和条数，点一下就回到那个时间点。恢复前会先 `pinSnapshot()` 把当前状态也存一份，所以这一步本身同样能退。
 
 App 启动时如果发现本地账本是空的、而上面有备份，会弹窗问「要恢复吗」。
+
+## 回收站
+
+`records` 里加了可选字段 `deletedAt`：没有或为 0 表示正常，有值表示在回收站。
+
+**没有升 DB_VERSION**，旧数据读出来 `deletedAt` 是 `undefined`，天然属于「正常」，所以不存在迁移失败把账本搞坏的风险。这是有意的设计——加字段比加 store 安全得多。
 
 ## 技术要点
 
