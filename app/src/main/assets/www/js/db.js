@@ -150,10 +150,17 @@
 
   function countByCategory(id) {
     return store(S_RECORDS, 'readonly')
-      .then(function (s) { return wrap(s.index('categoryId').count(IDBKeyRange.only(id))); });
+      .then(function (s) { return wrap(s.index('categoryId').getAll(IDBKeyRange.only(id))); })
+      .then(function (arr) { return arr.filter(alive).length; });
   }
 
   /* ---------- 记录 ---------- */
+
+  /* 软删除标记：没有 deletedAt（或为 0）表示正常，有值表示在回收站。
+     旧数据没有这个字段，读出来是 undefined，自然也属于「正常」——
+     所以不需要升 DB_VERSION，也就不存在迁移失败把账本搞坏的风险。 */
+  function alive(r) { return !r.deletedAt; }
+
   function listRecords(month) {
     return store(S_RECORDS, 'readonly')
       .then(function (s) {
@@ -163,11 +170,12 @@
         return wrap(s.getAll());
       })
       .then(function (arr) {
-        arr.sort(function (a, b) {
+        var out = arr.filter(alive);
+        out.sort(function (a, b) {
           if (a.date !== b.date) return a.date < b.date ? 1 : -1;
           return (b.createdAt || 0) - (a.createdAt || 0);
         });
-        return arr;
+        return out;
       });
   }
 
@@ -177,15 +185,107 @@
     rec.month = String(rec.date || '').slice(0, 7);
     rec.updatedAt = now;
     if (!rec.createdAt) rec.createdAt = now;
+    if (rec.deletedAt === undefined) rec.deletedAt = 0;
     return store(S_RECORDS, 'readwrite')
       .then(function (s) { return wrap(s.put(rec)); })
       .then(function () { touch(); return rec; });
   }
 
+  /** 删除 = 进回收站。真正抹掉要用 purgeRecord 或 emptyTrash */
   function deleteRecord(id) {
+    return getRecord(id).then(function (rec) {
+      if (!rec) return false;
+      rec.deletedAt = Date.now();
+      rec.updatedAt = rec.deletedAt;
+      return store(S_RECORDS, 'readwrite')
+        .then(function (s) { return wrap(s.put(rec)); })
+        .then(function () { touch(); return true; });
+    });
+  }
+
+  function getRecord(id) {
+    return store(S_RECORDS, 'readonly')
+      .then(function (s) { return wrap(s.get(id)); })
+      .then(function (r) { return r || null; });
+  }
+
+  function restoreRecord(id) {
+    return getRecord(id).then(function (rec) {
+      if (!rec) return false;
+      rec.deletedAt = 0;
+      rec.updatedAt = Date.now();
+      return store(S_RECORDS, 'readwrite')
+        .then(function (s) { return wrap(s.put(rec)); })
+        .then(function () { touch(); return true; });
+    });
+  }
+
+  /** 彻底删除单条，不可恢复 */
+  function purgeRecord(id) {
     return store(S_RECORDS, 'readwrite')
       .then(function (s) { return wrap(s.delete(id)); })
       .then(function () { touch(); });
+  }
+
+  /** 回收站里的记录，按删除时间倒序 */
+  function listTrash() {
+    return store(S_RECORDS, 'readonly')
+      .then(function (s) { return wrap(s.getAll()); })
+      .then(function (arr) {
+        var out = arr.filter(function (r) { return !!r.deletedAt; });
+        out.sort(function (a, b) { return (b.deletedAt || 0) - (a.deletedAt || 0); });
+        return out;
+      });
+  }
+
+  /** 把当前所有正常记录一次性移入回收站，返回处理条数 */
+  function trashAllRecords() {
+    return open().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var t = db.transaction(S_RECORDS, 'readwrite');
+        var s = t.objectStore(S_RECORDS);
+        var now = Date.now();
+        var n = 0;
+        var cursorReq = s.openCursor();
+        cursorReq.onsuccess = function () {
+          var cur = cursorReq.result;
+          if (!cur) return;
+          var rec = cur.value;
+          if (!rec.deletedAt) {
+            rec.deletedAt = now;
+            rec.updatedAt = now;
+            cur.update(rec);
+            n++;
+          }
+          cur.continue();
+        };
+        t.oncomplete = function () { touch(); resolve(n); };
+        t.onerror = function () { reject(t.error); };
+      });
+    });
+  }
+
+  /** 清空回收站：只对真正想彻底删掉的人用 */
+  function emptyTrash() {
+    return open().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var t = db.transaction(S_RECORDS, 'readwrite');
+        var s = t.objectStore(S_RECORDS);
+        var n = 0;
+        var cursorReq = s.openCursor();
+        cursorReq.onsuccess = function () {
+          var cur = cursorReq.result;
+          if (!cur) return;
+          if (cur.value.deletedAt) {
+            cur.delete();
+            n++;
+          }
+          cur.continue();
+        };
+        t.oncomplete = function () { touch(); resolve(n); };
+        t.onerror = function () { reject(t.error); };
+      });
+    });
   }
 
   /* ---------- 备份 ---------- */
@@ -230,6 +330,7 @@
 
         data.records.forEach(function (r) {
           if (!r || !r.id || !r.date) return;
+          if (r.deletedAt) return;   // 备份里已标记删除的，不再导回来
           rs.put({
             id: r.id,
             type: r.type === 'income' ? 'income' : 'expense',
@@ -239,7 +340,8 @@
             month: String(r.date).slice(0, 7),
             note: r.note || '',
             createdAt: r.createdAt || Date.now(),
-            updatedAt: r.updatedAt || Date.now()
+            updatedAt: r.updatedAt || Date.now(),
+            deletedAt: 0
           });
         });
 
@@ -262,10 +364,27 @@
     return open().then(function (db) {
       return new Promise(function (resolve, reject) {
         var t = db.transaction([S_CATS, S_RECORDS], 'readwrite');
-        t.objectStore(S_RECORDS).clear();
+
+        // 账单只是移入回收站，不会真的消失
+        var rs = t.objectStore(S_RECORDS);
+        var now = Date.now();
+        var curReq = rs.openCursor();
+        curReq.onsuccess = function () {
+          var cur = curReq.result;
+          if (!cur) return;
+          var rec = cur.value;
+          if (!rec.deletedAt) {
+            rec.deletedAt = now;
+            rec.updatedAt = now;
+            cur.update(rec);
+          }
+          cur.continue();
+        };
+
         var cs = t.objectStore(S_CATS);
         cs.clear();
         PRESET_CATEGORIES.forEach(function (c) { cs.put(c); });
+
         t.oncomplete = function () { touch(); resolve(true); };
         t.onerror = function () { reject(t.error); };
       });
@@ -281,8 +400,14 @@
     deleteCategory: deleteCategory,
     countByCategory: countByCategory,
     listRecords: listRecords,
+    getRecord: getRecord,
     putRecord: putRecord,
     deleteRecord: deleteRecord,
+    restoreRecord: restoreRecord,
+    purgeRecord: purgeRecord,
+    listTrash: listTrash,
+    trashAllRecords: trashAllRecords,
+    emptyTrash: emptyTrash,
     exportAll: exportAll,
     importAll: importAll,
     clearRecords: clearRecords,

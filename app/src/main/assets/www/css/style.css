@@ -913,6 +913,85 @@ input { font-family: inherit; }
 }
 .dlg-btn.danger { background: #ffecec; color: var(--expense); }
 
+/* ---------------- 回收站 ---------------- */
+.trash-list {
+  max-height: 46vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 -2px 12px;
+  padding: 0 2px;
+}
+.trash-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.trash-item:last-child { border-bottom: 0; }
+.ti-main { flex: 1; min-width: 0; }
+.ti-cat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--text);
+}
+.ti-emoji { flex: none; }
+.ti-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ti-amt { flex: none; font-size: 13px; font-weight: 600; }
+.ti-amt.income { color: var(--income); }
+.ti-amt.expense { color: var(--expense); }
+.ti-sub {
+  font-size: 11.5px;
+  color: var(--text3);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ti-ops { flex: none; display: flex; gap: 6px; }
+.ti-btn {
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 9px;
+  font-size: 12.5px;
+  background: #f2f4f7;
+  color: var(--text2);
+  white-space: nowrap;
+}
+.ti-btn.danger { background: #ffecec; color: var(--expense); }
+.trash-empty {
+  text-align: center;
+  padding: 26px 0 30px;
+  font-size: 13px;
+  color: var(--text3);
+  line-height: 1.9;
+}
+.trash-empty span { font-size: 12px; opacity: .85; }
+
+/* 备份历史里的一行（复用回收站的排版，只是整体可点） */
+.bk-row {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  padding: 10px 0;
+}
+.bk-row:last-child { border-bottom: 0; }
+.bk-row:active { background: #f7f8fa; }
+.bk-row .ti-name { font-size: 14px; color: var(--text); }
+
 /* ---------------- Toast ---------------- */
 .toast {
   position: fixed;

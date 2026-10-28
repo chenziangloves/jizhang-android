@@ -133,6 +133,28 @@
     return typeof s === 'string' ? s : '';
   }
 
+  /* ---------- 备份历史 ---------- */
+
+  /** 返回 [{name, at, records, bytes}]，第一条是最新那份 */
+  function listSnapshots() {
+    if (!bridge) return [];
+    var arr = safeJson(call('listSnapshots'), []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function loadSnapshot(name) {
+    if (!bridge) return '';
+    var s = call('loadSnapshot', String(name || 'latest'));
+    return typeof s === 'string' ? s : '';
+  }
+
+  /** 把当前备份钉成一份历史快照（恢复旧备份前先调，保证退得回来） */
+  function pinSnapshot() {
+    if (!bridge) return false;
+    call('pinSnapshot');
+    return true;
+  }
+
   function onBackup(fn) { if (typeof fn === 'function') watchers.push(fn); }
 
   function lastBackupAt() { return backupAt || (info() || {}).backupAt || 0; }
@@ -201,6 +223,9 @@
     scheduleBackup: scheduleBackup,
     backupNow: backupNow,
     loadBackup: loadBackup,
+    listSnapshots: listSnapshots,
+    loadSnapshot: loadSnapshot,
+    pinSnapshot: pinSnapshot,
     lastBackupAt: lastBackupAt,
     onBackup: onBackup
   };

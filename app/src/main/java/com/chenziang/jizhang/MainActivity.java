@@ -7,6 +7,7 @@ import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.database.Cursor;
 import android.graphics.Color;
@@ -56,6 +57,12 @@ public class MainActivity extends Activity {
             "https://appassets.androidplatform.net/assets/www/index.html";
     /** 自动备份文件名：同时存在于 App 私有目录和「下载/记账本备份」里，卸载重装也能捞回来 */
     private static final String AUTO_BACKUP_NAME = "jizhang-autobackup.json";
+    /** 备份历史里最多保留多少份快照 */
+    private static final int BACKUP_KEEP = 10;
+    /** 距上次快照超过这个时长就再留一份（6 小时） */
+    private static final long SNAPSHOT_GAP_MS = 6L * 60L * 60L * 1000L;
+    private static final String PREF_NAME = "jizhang";
+    private static final String KEY_LAST_SNAPSHOT = "lastSnapshotAt";
 
     private WebView webView;
     private ValueCallback<Uri[]> pendingFileCallback;
@@ -320,25 +327,10 @@ public class MainActivity extends Activity {
         public void autoBackup(final String json) {
             if (json == null || json.length() < 20) return;
             final byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+            final String text = json;
             new Thread(() -> {
                 try {
-                    File target = autoBackupFile();
-                    File tmp = new File(target.getAbsolutePath() + ".tmp");
-                    FileOutputStream fos = new FileOutputStream(tmp);
-                    fos.write(bytes);
-                    fos.flush();
-                    fos.close();
-                    if (target.exists()) {
-                        //noinspection ResultOfMethodCallIgnored
-                        target.delete();
-                    }
-                    if (!tmp.renameTo(target)) {
-                        FileOutputStream f2 = new FileOutputStream(target);
-                        f2.write(bytes);
-                        f2.close();
-                        //noinspection ResultOfMethodCallIgnored
-                        tmp.delete();
-                    }
+                    writeAutoBackup(text, bytes);
                 } catch (Exception ignored) {
                 }
                 try {
@@ -346,6 +338,187 @@ public class MainActivity extends Activity {
                 } catch (Exception ignored) {
                 }
             }).start();
+        }
+
+        /**
+         * 两份备份一起维护：
+         *   backup/jizhang-autobackup.json  —— 永远是最新一份，恢复时直接读它
+         *   backup/history/*.json           —— 历史快照，最多留 BACKUP_KEEP 份
+         *
+         * 什么时候留快照？只有两种情况，避免每记一笔就堆一个文件：
+         *   1) 记录条数比上次备份明显变少 —— 说明刚发生了删除/清空，
+         *      这时候先把「删之前」那份存成快照，误删才有得救；
+         *   2) 距离上一份快照超过 6 小时 —— 当作时间机器，最多丢半天。
+         */
+        private void writeAutoBackup(String text, byte[] bytes) throws Exception {
+            File latest = autoBackupFile();
+            int newCount = countRecords(text);
+            int oldCount = latest.exists() ? countRecords(readFileQuiet(latest)) : -1;
+
+            long now = System.currentTimeMillis();
+            long lastSnap = prefs().getLong(KEY_LAST_SNAPSHOT, 0L);
+            boolean shrunk = oldCount >= 0 && newCount >= 0 && newCount < oldCount;
+            boolean stale = now - lastSnap > SNAPSHOT_GAP_MS;
+
+            if (latest.exists() && (shrunk || stale)) {
+                snapshotFrom(latest, now);
+                prefs().edit().putLong(KEY_LAST_SNAPSHOT, now).apply();
+                pruneSnapshots();
+            }
+
+            File tmp = new File(latest.getAbsolutePath() + ".tmp");
+            FileOutputStream fos = new FileOutputStream(tmp);
+            fos.write(bytes);
+            fos.flush();
+            fos.close();
+            if (latest.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                latest.delete();
+            }
+            if (!tmp.renameTo(latest)) {
+                FileOutputStream f2 = new FileOutputStream(latest);
+                f2.write(bytes);
+                f2.close();
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+            }
+        }
+
+        private SharedPreferences prefs() {
+            return getSharedPreferences(PREF_NAME, MODE_PRIVATE);
+        }
+
+        private File backupDir() {
+            File base = getExternalFilesDir(null);
+            if (base == null) base = getFilesDir();
+            File dir = new File(base, "backup");
+            if (!dir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+            return dir;
+        }
+
+        private File snapshotDir() {
+            File dir = new File(backupDir(), "history");
+            if (!dir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.mkdirs();
+            }
+            return dir;
+        }
+
+        /** 从备份 JSON 里数记录条数，解析不了返回 -1 */
+        private int countRecords(String json) {
+            if (json == null || json.length() < 20) return -1;
+            try {
+                JSONArray a = new JSONObject(json).optJSONArray("records");
+                return a == null ? 0 : a.length();
+            } catch (Exception e) {
+                return -1;
+            }
+        }
+
+        private String readFileQuiet(File f) {
+            try {
+                if (f == null || !f.exists() || f.length() < 3) return null;
+                FileInputStream fis = new FileInputStream(f);
+                return readStream(fis);
+            } catch (Exception e) {
+                return null;
+            }
+        }
+
+        private void snapshotFrom(File src, long at) {
+            try {
+                File dst = new File(snapshotDir(), "jizhang-" + stamp(at) + ".json");
+                if (dst.exists()) return;
+                FileInputStream in = new FileInputStream(src);
+                FileOutputStream out = new FileOutputStream(dst);
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                in.close();
+                out.close();
+            } catch (Exception ignored) {
+            }
+        }
+
+        private String stamp(long at) {
+            java.text.SimpleDateFormat f =
+                    new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US);
+            return f.format(new java.util.Date(at));
+        }
+
+        private void pruneSnapshots() {
+            File[] fs = snapshotDir().listFiles();
+            if (fs == null || fs.length <= BACKUP_KEEP) return;
+            java.util.Arrays.sort(fs, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            for (int i = 0; i < fs.length - BACKUP_KEEP; i++) {
+                //noinspection ResultOfMethodCallIgnored
+                fs[i].delete();
+            }
+        }
+
+        /** 列出所有备份：第一条永远是最新那份，其余是历史快照，新的在前 */
+        @JavascriptInterface
+        public String listSnapshots() {
+            JSONArray arr = new JSONArray();
+            try {
+                File latest = autoBackupFile();
+                if (latest.exists()) {
+                    JSONObject o = new JSONObject();
+                    o.put("name", "latest");
+                    o.put("at", latest.lastModified());
+                    o.put("records", countRecords(readFileQuiet(latest)));
+                    o.put("bytes", latest.length());
+                    arr.put(o);
+                }
+                File[] fs = snapshotDir().listFiles();
+                if (fs != null) {
+                    java.util.Arrays.sort(fs, (a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+                    for (File f : fs) {
+                        if (!f.getName().endsWith(".json")) continue;
+                        JSONObject o = new JSONObject();
+                        o.put("name", f.getName());
+                        o.put("at", f.lastModified());
+                        o.put("records", countRecords(readFileQuiet(f)));
+                        o.put("bytes", f.length());
+                        arr.put(o);
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            return arr.toString();
+        }
+
+        /** 立刻把当前这份备份钉成历史快照。恢复旧备份前调用，保证当前状态也能退回来 */
+        @JavascriptInterface
+        public void pinSnapshot() {
+            try {
+                File latest = autoBackupFile();
+                if (!latest.exists()) return;
+                long now = System.currentTimeMillis();
+                snapshotFrom(latest, now);
+                prefs().edit().putLong(KEY_LAST_SNAPSHOT, now).apply();
+                pruneSnapshots();
+            } catch (Exception ignored) {
+            }
+        }
+
+        /** 读某一份备份的内容，name 传 "latest" 读最新 */
+        @JavascriptInterface
+        public String loadSnapshot(String name) {
+            try {
+                if (name == null || name.isEmpty() || "latest".equals(name)) {
+                    return readFileQuiet(autoBackupFile());
+                }
+                // 只认文件名，挡住 ../ 之类的路径穿越
+                if (name.contains("..") || name.contains("/") || name.contains("\\")) return null;
+                return readFileQuiet(new File(snapshotDir(), name));
+            } catch (Exception e) {
+                return null;
+            }
         }
 
         @JavascriptInterface
@@ -368,14 +541,7 @@ public class MainActivity extends Activity {
         }
 
         private File autoBackupFile() {
-            File base = getExternalFilesDir(null);
-            if (base == null) base = getFilesDir();
-            File dir = new File(base, "backup");
-            if (!dir.exists()) {
-                //noinspection ResultOfMethodCallIgnored
-                dir.mkdirs();
-            }
-            return new File(dir, AUTO_BACKUP_NAME);
+            return new File(backupDir(), AUTO_BACKUP_NAME);
         }
 
         /** 同时往「下载/记账本备份」放一份，卸载 App 也不会丢 */

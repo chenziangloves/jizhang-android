@@ -54,7 +54,7 @@ jobs:
         id: ver
         run: |
           VC=$((1000 + ${{ github.run_number }}))
-          VN="1.2.${{ github.run_number }}"
+          VN="1.3.${{ github.run_number }}"
           echo "VC=$VC" >> "$GITHUB_ENV"
           echo "VN=$VN" >> "$GITHUB_ENV"
           echo "VC=$VC" >> "$GITHUB_OUTPUT"

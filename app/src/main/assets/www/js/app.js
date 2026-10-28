@@ -379,10 +379,16 @@
         '<span class="a-main">导入恢复<span class="a-sub">从备份文件还原（会覆盖当前所有数据）</span></span>' +
         '<span class="a-arrow">›</span>' +
       '</button>' +
-      '<div class="action-row static">' +
+      '<button class="action-row" data-act="open-backups" type="button">' +
         '<span class="a-icon">🛡️</span>' +
         '<span class="a-main">自动备份<span class="a-sub">' + esc(autoBackupText()) + '</span></span>' +
-      '</div>' +
+        '<span class="a-arrow">›</span>' +
+      '</button>' +
+      '<button class="action-row" data-act="open-trash" type="button">' +
+        '<span class="a-icon">🗂️</span>' +
+        '<span class="a-main">回收站<span class="a-sub">删掉的账单先收在这里，可以恢复</span></span>' +
+        '<span class="a-arrow">›</span>' +
+      '</button>' +
       '<button class="action-row" data-act="check-update" type="button">' +
         '<span class="a-icon">🔄</span>' +
         '<span class="a-main">检查更新<span class="a-sub">当前版本 ' + esc(versionText()) + '</span></span>' +
@@ -650,7 +656,9 @@
   }
 
   function closeDialog() {
-    $('#dialog').classList.remove('on');
+    var d = $('#dialog');
+    d.classList.remove('on');
+    d.onclick = null;   // 回收站用的是赋值式监听，关掉要清掉，免得留给下一个对话框
     $('#dialog-backdrop').classList.remove('on');
   }
 
@@ -812,6 +820,183 @@
       reader.readAsText(file);
     };
     input.click();
+  }
+
+  /* ================= 回收站 ================= */
+
+  function openTrash() {
+    DB.listTrash().then(function (items) { renderTrash(items); })
+      .catch(function (e) { toast('读取回收站失败：' + (e && e.message ? e.message : e)); });
+  }
+
+  function trashItemHtml(r) {
+    var sign = r.type === 'income' ? '+' : '-';
+    return '<div class="trash-item">' +
+      '<div class="ti-main">' +
+        '<div class="ti-cat">' +
+          '<span class="ti-emoji">' + catEmoji(r.categoryId) + '</span>' +
+          '<span class="ti-name">' + esc(catName(r.categoryId)) + '</span>' +
+          '<span class="ti-amt ' + (r.type === 'income' ? 'income' : 'expense') + '">' +
+            sign + '¥' + money(r.amount) +
+          '</span>' +
+        '</div>' +
+        '<div class="ti-sub">' + esc(dayLabel(r.date)) +
+          (r.note ? ' · ' + esc(r.note) : '') +
+          ' · 删除于 ' + esc(fmtStamp(r.deletedAt)) +
+        '</div>' +
+      '</div>' +
+      '<div class="ti-ops">' +
+        '<button class="ti-btn" data-trash-act="restore" data-id="' + esc(r.id) + '" type="button">恢复</button>' +
+        '<button class="ti-btn danger" data-trash-act="purge" data-id="' + esc(r.id) + '" type="button">彻底删除</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderTrash(items) {
+    var body;
+    if (!items.length) {
+      body = '<div class="trash-empty">回收站是空的<br>' +
+        '<span>删掉的账单会先放这儿，随时能找回来</span></div>';
+    } else {
+      body = '<div class="trash-list">' + items.map(trashItemHtml).join('') + '</div>';
+    }
+
+    openDialog(
+      '<div class="dlg-title">回收站</div>' +
+      '<div class="dlg-desc">' +
+        (items.length
+          ? '共 <b>' + items.length + '</b> 笔。恢复后回到原来的日期，不影响统计。'
+          : '暂时没有可恢复的记录。') +
+      '</div>' +
+      body +
+      '<div class="dlg-actions">' +
+        (items.length
+          ? '<button class="dlg-btn danger" data-trash-act="empty" type="button">清空回收站</button>'
+          : '') +
+        '<button class="dlg-btn primary" data-trash-act="close" type="button">关闭</button>' +
+      '</div>',
+      function (root) {
+        // 用 onclick 赋值而不是 addEventListener：这份对话框会反复重绘，
+        // 用后者会越叠越多，点一次触发好几次
+        root.onclick = function (ev) {
+          var btn = ev.target.closest('[data-trash-act]');
+          if (!btn) return;
+          var act = btn.dataset.trashAct;
+          var id = btn.dataset.id;
+
+          if (act === 'close') { closeDialog(); return; }
+
+          if (act === 'restore') {
+            DB.restoreRecord(id).then(function () {
+              toast('已恢复');
+              return refresh();
+            }).then(function () {
+              return DB.listTrash();
+            }).then(renderTrash);
+            return;
+          }
+
+          if (act === 'purge') {
+            DB.purgeRecord(id).then(function () {
+              return DB.listTrash();
+            }).then(renderTrash);
+            return;
+          }
+
+          if (act === 'empty') {
+            askConfirm('清空回收站？',
+              '这 <b>' + items.length + '</b> 笔记录会被彻底删除，<b>无法再恢复</b>。<br>建议先「导出备份」留一份。',
+              '确定清空', true).then(function (yes) {
+              if (!yes) {
+                // 取消时把回收站列表画回来，否则用户会看到一个空对话框
+                return DB.listTrash().then(renderTrash);
+              }
+              DB.emptyTrash().then(function (n) {
+                toast('已彻底删除 ' + n + ' 笔');
+                return DB.listTrash();
+              }).then(renderTrash);
+            });
+          }
+        };
+      }
+    );
+  }
+
+  /* ================= 备份历史 ================= */
+
+  function openBackups() {
+    if (!nativeOk()) { toast('备份历史只在 App 里有，网页版请用「导出备份」'); return; }
+    var snaps = window.JZ.listSnapshots ? window.JZ.listSnapshots() : [];
+    if (!snaps.length) {
+      toast('还没有备份，记一笔就会自动生成');
+      return;
+    }
+    renderBackups(snaps);
+  }
+
+  function renderBackups(snaps) {
+    var rows = snaps.map(function (s) {
+      var kb = Math.max(1, Math.round((s.bytes || 0) / 1024));
+      var isLatest = s.name === 'latest';
+      return '<button class="trash-item bk-row" data-bk="' + esc(s.name) + '" type="button">' +
+        '<div class="ti-main">' +
+          '<div class="ti-cat">' +
+            '<span class="ti-name">' + (isLatest ? '最新备份' : esc(fmtStamp(s.at))) + '</span>' +
+            '<span class="ti-amt">' + (s.records > 0 ? s.records + ' 笔' : '--') + '</span>' +
+          '</div>' +
+          '<div class="ti-sub">' + esc(fmtStamp(s.at)) + ' · ' + kb + ' KB' +
+            (isLatest ? ' · 正在使用' : '') +
+          '</div>' +
+        '</div>' +
+      '</button>';
+    }).join('');
+
+    openDialog(
+      '<div class="dlg-title">备份历史</div>' +
+      '<div class="dlg-desc">' +
+        '每次<b>删除或清空</b>之前、以及每隔 6 小时，会自动留一份，最多 10 份。<br>' +
+        '点任意一份就能回到那个时间点。' +
+      '</div>' +
+      '<div class="trash-list">' + rows + '</div>' +
+      '<div class="dlg-actions">' +
+        '<button class="dlg-btn primary" data-bk-act="close" type="button">关闭</button>' +
+      '</div>',
+      function (root) {
+        root.onclick = function (ev) {
+          var btn = ev.target.closest('[data-bk-act], [data-bk]');
+          if (!btn) return;
+          if (btn.dataset.bkAct === 'close') { closeDialog(); return; }
+          if (btn.dataset.bk === 'latest') { toast('这就是当前正在用的那份'); return; }
+          var item = snaps.filter(function (x) { return x.name === btn.dataset.bk; })[0];
+          if (item) confirmRestore(item);
+        };
+      }
+    );
+  }
+
+  function confirmRestore(item) {
+    askConfirm('回到 ' + fmtStamp(item.at) + ' 的状态？',
+      '这份备份有 <b>' + (item.records > 0 ? item.records : '若干') + '</b> 笔记录。<br>' +
+      '当前的账本会先另存为一份新快照，所以随时能再退回来。',
+      '恢复', false).then(function (yes) {
+      if (!yes) { openBackups(); return; }
+
+      var raw = window.JZ.loadSnapshot(item.name);
+      if (!raw) { toast('这份备份读不出来，可能已被清理'); return; }
+
+      var data;
+      try { data = JSON.parse(raw); } catch (e) { toast('备份文件内容损坏，无法恢复'); return; }
+      if (!data || !Array.isArray(data.records)) { toast('备份格式不对，没有恢复'); return; }
+
+      window.JZ.pinSnapshot();   // 先把当前状态钉成快照，保证这一步也能退
+      DB.importAll(data).then(function (r) {
+        closeDialog();
+        toast('已恢复到 ' + fmtStamp(item.at) + '，共 ' + r.records + ' 笔');
+        return refresh();
+      }).catch(function (e) {
+        toast('恢复失败：' + (e && e.message ? e.message : e));
+      });
+    });
   }
 
   /* ================= 版本 / 更新 / 自动备份 ================= */
@@ -1005,6 +1190,98 @@
     toastTimer = setTimeout(function () { el.classList.remove('on'); }, 1900);
   }
 
+  /* ================= 动作表 =================
+   * 视图区和记一笔面板的点击都通过 data-act 分发。
+   * 以前是一条几十个分支的 if-else 链，新增功能只能往里塞一行；
+   * 现在改成查表：加动作 = 往表里加一个键，分发逻辑一行不用改。
+   */
+
+  var VIEW_ACTIONS = {
+    'prev-month': function () {
+      state.month = shiftMonth(state.month, -1);
+      refresh();
+    },
+    'next-month': function () {
+      var next = shiftMonth(state.month, 1);
+      if (next > thisMonth()) { toast('还没到的月份'); return; }
+      state.month = next;
+      refresh();
+    },
+    'open-rec': function (el) {
+      var id = el.dataset.id;
+      var rec = state.allRecords.filter(function (r) { return r.id === id; })[0];
+      if (rec) openEditor(rec);
+    },
+    'fil-type': function (el) {
+      state.filter.type = el.dataset.type;
+      state.filter.categoryId = '';
+      render();
+    },
+    'fil-cat': function (el) {
+      state.filter.categoryId = el.dataset.cat || '';
+      render();
+    },
+    'add-cat': function (el) { openCategoryDialog(null, el.dataset.type); },
+    'edit-cat': function (el) { openCategoryDialog(catOf(el.dataset.id), null); },
+    'del-cat': function (el) { deleteCategoryFlow(el.dataset.id); },
+    'export': function () { doExport(); },
+    'import': function () { doImport(); },
+    'check-update': function () { doCheckUpdate(); },
+    'download-page': function () { openUpdatePage(); },
+    'clear-records': function () {
+      askConfirm('清空所有账单？',
+        '共 <b>' + state.allRecords.length + '</b> 笔记录会被移入回收站，分类保留。<br>之后可以在「设置 → 回收站」里恢复。',
+        '确认清空', true)
+        .then(function (ok) {
+          if (!ok) return;
+          DB.trashAllRecords().then(function (n) {
+            toast(n ? '已移入回收站 ' + n + ' 笔' : '没有可清理的记录');
+            return refresh();
+          });
+        });
+    },
+    'reset-all': function () {
+      askConfirm('恢复出厂设置？',
+        '所有账单会移入回收站，自定义分类会被删除并恢复为默认。<br>这个操作同样可以从回收站找回账单。',
+        '确认重置', true)
+        .then(function (ok) {
+          if (!ok) return;
+          DB.resetAll().then(function () { toast('已重置，账单已移入回收站'); return refresh(); });
+        });
+    },
+    'open-trash': function () { openTrash(); },
+    'open-backups': function () { openBackups(); }
+  };
+
+  var SHEET_ACTIONS = {
+    'ed-key': function (el) { pressKey(el.dataset.key); },
+    'ed-type': function (el) {
+      var t = el.dataset.type;
+      if (state.editor.type === t) return;
+      state.editor.type = t;
+      state.editor.categoryId = '';
+      renderSheet();
+    },
+    'ed-cat': function (el) {
+      state.editor.categoryId = el.dataset.id;
+      $$('#cat-grid .cat-item').forEach(function (b) { b.classList.toggle('on', b === el); });
+      updateAmountView();
+    },
+    'ed-close': function () { closeSheet(); },
+    'ed-save': function () { saveEditor(); },
+    'ed-delete': function () {
+      var id = state.editor.id;
+      askConfirm('删除这笔记录？', '会移入回收站，之后仍可恢复。', '删除', true).then(function (ok) {
+        if (!ok) return;
+        DB.deleteRecord(id).then(function () {
+          closeSheet();
+          toast('已移入回收站');
+          return refresh();
+        });
+      });
+    }
+  };
+
   /* ================= 事件绑定 ================= */
 
   function bindGlobal() {
@@ -1020,83 +1297,16 @@
     $('#views').addEventListener('click', function (ev) {
       var el = ev.target.closest('[data-act]');
       if (!el) return;
-      var act = el.dataset.act;
-
-      if (act === 'prev-month') { state.month = shiftMonth(state.month, -1); refresh(); }
-      else if (act === 'next-month') {
-        var next = shiftMonth(state.month, 1);
-        if (next > thisMonth()) { toast('还没到的月份'); return; }
-        state.month = next; refresh();
-      }
-      else if (act === 'open-rec') {
-        var id = el.dataset.id;
-        var rec = state.allRecords.filter(function (r) { return r.id === id; })[0];
-        if (rec) openEditor(rec);
-      }
-      else if (act === 'fil-type') {
-        state.filter.type = el.dataset.type;
-        state.filter.categoryId = '';
-        render();
-      }
-      else if (act === 'fil-cat') {
-        state.filter.categoryId = el.dataset.cat || '';
-        render();
-      }
-      else if (act === 'add-cat') { openCategoryDialog(null, el.dataset.type); }
-      else if (act === 'edit-cat') { openCategoryDialog(catOf(el.dataset.id), null); }
-      else if (act === 'del-cat') { deleteCategoryFlow(el.dataset.id); }
-      else if (act === 'export') { doExport(); }
-      else if (act === 'import') { doImport(); }
-      else if (act === 'check-update') { doCheckUpdate(); }
-      else if (act === 'download-page') { openUpdatePage(); }
-      else if (act === 'clear-records') {
-        askConfirm('清空所有账单？', '共 <b>' + state.allRecords.length + '</b> 笔记录将被删除，分类会保留。<br>此操作无法撤销。', '确认清空', true)
-          .then(function (ok) {
-            if (!ok) return;
-            DB.clearRecords().then(function () { toast('已清空'); return refresh(); });
-          });
-      }
-      else if (act === 'reset-all') {
-        askConfirm('恢复出厂设置？', '所有账单和自定义分类都会被删除，分类恢复为默认。<br>此操作无法撤销，建议先导出备份。', '确认重置', true)
-          .then(function (ok) {
-            if (!ok) return;
-            DB.resetAll().then(function () { toast('已重置'); return refresh(); });
-          });
-      }
+      var fn = VIEW_ACTIONS[el.dataset.act];
+      if (fn) fn(el);
     });
 
     // 面板委托
     $('#sheet').addEventListener('click', function (ev) {
       var el = ev.target.closest('[data-act]');
       if (!el || !state.editor) return;
-      var act = el.dataset.act;
-
-      if (act === 'ed-key') { pressKey(el.dataset.key); }
-      else if (act === 'ed-type') {
-        var t = el.dataset.type;
-        if (state.editor.type === t) return;
-        state.editor.type = t;
-        state.editor.categoryId = '';
-        renderSheet();
-      }
-      else if (act === 'ed-cat') {
-        state.editor.categoryId = el.dataset.id;
-        $$('#cat-grid .cat-item').forEach(function (b) { b.classList.toggle('on', b === el); });
-        updateAmountView();
-      }
-      else if (act === 'ed-close') { closeSheet(); }
-      else if (act === 'ed-save') { saveEditor(); }
-      else if (act === 'ed-delete') {
-        var id = state.editor.id;
-        askConfirm('删除这笔记录？', '删除后无法恢复。', '删除', true).then(function (ok) {
-          if (!ok) return;
-          DB.deleteRecord(id).then(function () {
-            closeSheet();
-            toast('已删除');
-            return refresh();
-          });
-        });
-      }
+      var fn = SHEET_ACTIONS[el.dataset.act];
+      if (fn) fn(el);
     });
 
     // 遮罩关闭
